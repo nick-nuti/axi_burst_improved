@@ -11,6 +11,9 @@
     // data fifo: {wdata, wstrb}
     // resp fifo: {bresp, bid}
 
+    // misaligned addr adjustment
+    // narrow burst?
+
 module axi_burst_master #(
     parameter AXI_VER=0, // 4 = AXI4, else = AXI3
     parameter ADDR_W=32,
