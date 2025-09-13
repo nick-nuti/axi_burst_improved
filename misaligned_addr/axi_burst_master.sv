@@ -12,7 +12,7 @@
     // resp fifo: {bresp, bid}
 
     // misaligned addr adjustment
-    // narrow burst?
+    // narrow burst: yes, if someone changes AWSIZE at somepoint then keep the data_w size the same and just use write strobe accordingly
 
 module axi_burst_master #(
     parameter AXI_VER=0, // 4 = AXI4, else = AXI3
@@ -24,6 +24,7 @@ module axi_burst_master #(
     parameter SPLIT_PAGE_BOUNDARY=1, // 0: end burst at page boundary, >0: split burst at page boundary
     parameter BURST_POLICY=0, // 0: (safe) require full burst upfront, 1: stream, wait until data is present by lowering wvalid, 2: pad with dummy data if fifo empty
     parameter MISALIGN_ADJUST=0 // 0: disallow (results in error), >0: allow
+    parameter NARROW_BURST=0 // 0: disallow (results in error), >0: allow
 )
 (
     m_axi_awaddr,
