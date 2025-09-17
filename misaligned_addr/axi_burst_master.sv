@@ -86,9 +86,12 @@ module axi_burst_master #(
 );
 
 // GENERAL
+    localparam BYTE = 8;
     localparam PAGE_SIZE_BYTES_CLOG = $clog2(PAGE_SIZE_BYTES);
-    localparam DATA_W_BYTES = DATA_W/8;
+    localparam DATA_W_CLOG = $clog2(DATA_W);
+    localparam DATA_W_BYTES = DATA_W/BYTE;
     localparam DATA_W_BYTES_CLOG = $clog2(DATA_W_BYTES);
+    localparam STRB_W_CLOG = $clog2(DATA_W_BYTES);
 
 // AXI
     localparam LEN_W    = (AXI_VER == 4) ? 8 : 4;
@@ -119,7 +122,7 @@ module axi_burst_master #(
     output reg [ID_W-1:0]               m_axi_awid;
 /**************** Write Data Channel Signals ****************/
     output reg [DATA_W-1:0]             m_axi_wdata;     //
-    output reg [DATA_W_BYTES-1:0]       m_axi_wstrb;     //
+    output reg [STRB_W-1:0]             m_axi_wstrb;     //
     output reg                          m_axi_wvalid;    // set to 1 when data is ready to be transferred (done)
     input  wire                         m_axi_wready;    // 
     output reg                          m_axi_wlast;     // if awlen=0 then set wlast (done)
@@ -309,8 +312,8 @@ generate
                 m_axi_awaddr  = addr_w_tmp_ff;
             end
 
-            w_data_final = (MISALIGN_ADJUST==0) ? user_w_data : w_data_aligned;
-            w_strb_final = (MISALIGN_ADJUST==0) ? user_w_strb : w_strb_aligned;
+            w_data_final = (MISALIGN_ADJUST==0) ? user_w_data : /*<aligned data here>*/;
+            w_strb_final = (MISALIGN_ADJUST==0) ? user_w_strb : /*<aligned wstrb here>*/;
 
             if(axi_w_cs==WRITE)
             begin
@@ -351,6 +354,23 @@ generate
     // TODO
     reg  [DATA_W_BYTES_CLOG-1:0]    w_addr_offset_ff;
 
+    reg carry_valid_ff;
+    reg [DATA_W-1:0] carry_w_data_ff;
+    reg [STRB_W-1:0] carry_w_strb_ff;
+
+    wire [DATA_W-1:0] aligned_w_data;
+    wire [DATA_W-1:0] carry_w_data;
+    wire [DATA_W-1:0] aligned_w_data_final;
+    wire [STRB_W-1:0] aligned_w_strb;
+    wire [STRB_W-1:0] carry_w_strb;
+    wire [STRB_W-1:0] aligned_w_strb_final;
+
+    wire [DATA_W_CLOG-1:0] w_data_shift_left;
+    wire [DATA_W_CLOG-1:0] w_data_shift_right;
+
+    wire [STRB_W_CLOG-1:0] w_strb_shift_left;
+    wire [STRB_W_CLOG-1:0] w_strb_shift_right;
+
     // Requirement:
         // - sequential logic for holding carry out data
             // carry valid (check wstrb bits)
@@ -377,14 +397,40 @@ generate
 
         always_comb
         begin
-            
+            w_data_shift_left = (w_addr_offset_ff * BYTE);
+            w_data_shift_right = (DATA_W - w_data_shift_left);
+
+            w_strb_shift_left = (w_addr_offset_ff);
+            w_strb_shift_right = (DATA_W_BYTES - w_strb_shift_left);
+
+            if(w_addr_offset_ff == 0)
+            begin
+                aligned_w_data  =  user_w_data;
+                carry_w_data    =  'h0;
+                aligned_w_strb  =  user_w_strb;
+                carry_w_strb    =  'h0;
+            end
+
+            else
+            begin
+                aligned_w_data  =  (user_w_data << (w_data_shift_left));
+                carry_w_data    =  (user_w_data >> (w_data_shift_right));
+
+                aligned_w_strb  =  (user_w_strb << (w_strb_shift_left));
+                carry_w_strb    =  (user_w_strb >> (w_strb_shift_right));
+            end
         end
+
 
         always_ff @ (posedge aclk)
         begin
             if(~aresetn)
             begin
                 w_addr_offset_ff <= 'h0;
+
+                carry_valid_ff <= 'h0;
+                carry_w_data_ff <= 'h0;
+                carry_w_strb_ff <= 'h0;
             end
 
             else
@@ -392,13 +438,36 @@ generate
                 if(start_w_ff)
                 begin
                     w_addr_offset_ff <= 'h0;
+
+                    carry_valid_ff <= 'h0;
+                    carry_w_data_ff <= 'h0;
+                    carry_w_strb_ff <= 'h0;
                 end
 
                 else if(axi_w_cs==WRITE_CHK_CMD && start_w_addr_misalign_flag)
                 begin
                     w_addr_offset_ff <= w_addr_offset;
                 end
+
+                if(axi_w_cs==WRITE && m_axi_wready && m_axi_wvalid)
+                begin
+                    carry_valid_ff <= (|carry_w_strb);
+                    carry_w_data_ff <= carry_w_data;
+                    carry_w_strb_ff <= carry_w_strb;
+                end
+
             end
+        end
+
+        always_comb
+        begin
+            aligned_w_data_final = 'h0;
+            aligned_w_strb_final = 'h0;
+
+            aligned_w_data_final = ((carry_valid_ff) ? carry_w_data_ff : 'h0)| aligned_w_data;
+            aligned_w_strb_final = ((carry_valid_ff) ? carry_w_strb_ff : 'h0)| aligned_w_strb;
+
+            // need to save the 'carry_w_data_ff' and 'carry_w_strb_ff' if 'burst_w_split_flag_ff' flag is set
         end
 
 // ---- Underrun flag ---- //
