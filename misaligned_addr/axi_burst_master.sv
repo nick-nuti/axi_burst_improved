@@ -24,7 +24,7 @@ module axi_burst_master #(
     parameter SPLIT_PAGE_BOUNDARY=1, // 0: end burst at page boundary, >0: split burst at page boundary
     parameter BURST_POLICY=0, // 0: (safe) require full burst upfront, 1: stream, wait until data is present by lowering wvalid, 2: pad with dummy data if fifo empty
     parameter MISALIGN_ADJUST=0 // 0: disallow (results in error), >0: allow
-    parameter NARROW_BURST=0 // 0: disallow (results in error), >0: allow
+    //parameter NARROW_BURST=0 // 0: disallow (results in error), >0: allow
 )
 (
     m_axi_awaddr,
@@ -94,17 +94,18 @@ module axi_burst_master #(
     localparam STRB_W_CLOG = $clog2(DATA_W_BYTES);
 
 // AXI
-    localparam LEN_W    = (AXI_VER == 4) ? 8 : 4;
-    localparam LOCK_W   = (AXI_VER == 4) ? 1 : 2;
-    localparam STRB_W   = DATA_W_BYTES;
-    localparam QOS_W    = 4;
-    localparam CACHE_W  = 4;
-    localparam ABURST_W = 2;
-    localparam ASIZE_W  = DATA_W_BYTES_CLOG;
-    localparam PROT_W   = 3;
-    localparam RESP_W   = 2;
-    localparam REGION_W = 4;
-    localparam ID_W     = 0;
+    localparam LEN_W            = (AXI_VER == 4) ? 8 : 4;
+    localparam LOCK_W           = (AXI_VER == 4) ? 1 : 2;
+    localparam STRB_W           = DATA_W_BYTES;
+    localparam QOS_W            = 4;
+    localparam CACHE_W          = 4;
+    localparam ABURST_W         = 2;
+    localparam ASIZE_W          = DATA_W_BYTES_CLOG;
+    localparam PROT_W           = 3;
+    localparam RESP_W           = 2;
+    localparam REGION_W         = 4;
+    localparam ID_W             = 0;
+    localparam MAX_BURST_BEATS  = 1 << (LEN_W);
 
 // PORT DECLARATION
 /**************** Write Address Channel Signals ****************/
@@ -163,6 +164,7 @@ module axi_burst_master #(
     output wire [RESP_W-1:0]                    user_w_status; // 00:OKAY, 01:EXOKAY, 10:SLVERR, 11:DECERR
     output wire                                 user_w_free;
     output wire [3:0]                           user_w_cmd_error; // 00:OKAY, 01:NOROOM (1 beat can't fit before next page boundary), 
+    output wire                                 user_w_underrun_event;
     //write data
     input  wire [STRB_W-1:0]                    user_w_strb;
     input  wire [DATA_W-1:0]                    user_w_data;
@@ -431,31 +433,54 @@ generate
                 carry_valid_ff <= 'h0;
                 carry_w_data_ff <= 'h0;
                 carry_w_strb_ff <= 'h0;
+
+                burst_split_carry_w_data_ff <= 'h0;
+                burst_split_carry_w_strb_ff <= 'h0;
             end
 
             else
             begin
-                if(start_w_ff)
+                if(start_w_ff && (burst_split_carry_w_strb_ff =='h0))
                 begin
-                    w_addr_offset_ff <= 'h0;
-
                     carry_valid_ff <= 'h0;
                     carry_w_data_ff <= 'h0;
                     carry_w_strb_ff <= 'h0;
                 end
 
-                else if(axi_w_cs==WRITE_CHK_CMD && start_w_addr_misalign_flag)
+                else if(start_w_ff && (burst_split_carry_w_strb_ff !='h0))
                 begin
-                    w_addr_offset_ff <= w_addr_offset;
+                    carry_w_data_ff <= burst_split_carry_w_data_ff;
+                    carry_w_strb_ff <= burst_split_carry_w_strb_ff;
+                    carry_valid_ff  <= |burst_split_carry_w_strb_ff;
+
+                    burst_split_carry_w_data_ff <= '0;
+                    burst_split_carry_w_strb_ff <= '0;
                 end
 
-                if(axi_w_cs==WRITE && m_axi_wready && m_axi_wvalid)
+                else if(axi_w_cs==WRITE && m_axi_wready && m_axi_wvalid)
                 begin
                     carry_valid_ff <= (|carry_w_strb);
                     carry_w_data_ff <= carry_w_data;
                     carry_w_strb_ff <= carry_w_strb;
                 end
 
+                else if ((axi_w_cs == WRITE) && (m_axi_wvalid && m_axi_wready) && (m_axi_wlast) && burst_w_split_flag_ff) 
+                begin
+                    // shifted_hi at this moment is the spill from this last beat -> belongs to next burst
+                    burst_split_carry_w_data_ff <= carry_w_data;
+                    burst_split_carry_w_strb_ff <= carry_w_strb;
+                end
+            ////
+                if(start_w_ff && (burst_split_carry_w_strb_ff =='h0))
+                begin
+                    w_addr_offset_ff <= 'h0;
+                end
+
+                else if(axi_w_cs==WRITE_CHK_CMD)
+                begin
+                    w_addr_offset_ff <= misalign_bytes;
+                end
+            ////
             end
         end
 
@@ -502,7 +527,7 @@ generate
             end
         end
 
-        assign user_w_status[2] = underrun_flag_ff;
+        assign user_w_underrun_event = underrun_flag_ff;
 
 // ---- Start + 1-stage pipeline + automatic start for cmd boundary split mechanism ---- //
         assign start_write  = (~error_redux_or) & start_w_ff;
@@ -589,28 +614,24 @@ generate
 //---- COMB + SEQ logic used for basis of error-checking and splitting bursts ----//
         always_comb
         begin
+        // misaligned address
+            total_bytes = ((user_w_len_ff + 1) << DATA_W_BYTES_CLOG);
+            misalign_bytes = user_w_addr_ff[DATA_W_BYTES_CLOG-1:0]
+            beats_required = ((total_bytes + misalign_bytes) + (DATA_W_BYTES-1)) >> DATA_W_BYTES_CLOG;
+
         // burst splitting
             // bytes until boundary
             bytes_until_boundary = PAGE_SIZE_BYTES - (user_w_addr_ff[PAGE_SIZE_BYTES_CLOG-1:0]);
-            
-            // axi burst beats until boundary
-                // = (bytes until boundary) / 2^($clog2(DATA_W_BYTES)) ; where DATA_W must be a whole number and a factor of 2^N
-                    // -> NOTE: DATA_W is the width of a burst beat in bits
-                    // -> DATA_W_BYTES = DATA_W/8
-                    // -> $clog2(DATA_W_BYTES) is the number of bits in DATA_W_BYTES ; we need this to emulate division with shifting
-                // This equation explained: (beats until boundary) = (bytes until boundary) / (bytes in a burst beat) 
-            beats_until_boundary = (bytes_until_boundary >> $clog2(DATA_W_BYTES));
+            // burst beats until boundary
+            beats_until_boundary = (bytes_until_boundary >> DATA_W_BYTES_CLOG);
+            // adjusted for awlen (len-1)
             awlen_until_boundary = (beats_until_boundary == 0) ? 0 : beats_until_boundary-1;
-
-        // misaligned address
-            w_addr_aligned = user_w_addr_ff & ~(DATA_W_BYTES-1);
-            w_addr_offset = user_w_addr_ff[DATA_W_BYTES_CLOG-1:0];
 
         // error detection
             no_beats_fit_flag                   = (beats_until_boundary == 0);
             page_boundary_cross_no_split_flag   = (awlen_until_boundary < user_w_len_ff);
             insufficient_wdata_flag             = (user_w_fifo_cnt < user_w_len_ff+1);
-            start_w_addr_misalign_flag            = (w_addr_offset != 0);
+            start_w_addr_misalign_flag          = (misalign_bytes != 0);
 
             error_wrap = {
                             (MISALIGN_ADJUST == 0) && start_w_addr_misalign_flag, 
@@ -620,6 +641,9 @@ generate
                         };
 
             error_redux_or = |error_wrap;
+
+        // len decision
+            len_decided = (page_boundary_cross_no_split_flag) ? awlen_until_boundary : ((beats_required > (MAX_BURST_BEATS-1)) ? MAX_BURST_BEATS-1 : user_w_len_ff);
         end
 
         always_ff @ (posedge aclk)
@@ -646,16 +670,16 @@ generate
                             // - handle if misaligned address causes len+1 > max_burst size
                             // - handle if misaligned address burst goes across page boundaryg (remember still len+1)
 
-                        addr_w_tmp_ff   <= user_w_addr_ff;
-                        len_w_tmp_ff    <= min(beats_until_boundary, user_w_len_ff+1);
+                        addr_w_tmp_ff   <= user_w_addr_ff & ~(DATA_W_BYTES-1);
+                        len_w_tmp_ff    <= len_decided - 1;
 
                         if(SPLIT_PAGE_BOUNDARY > 0)
                         begin
-                            if(user_w_len_ff > beats_until_boundary)
+                            if(beats_required > len_decided)
                             begin
                                 burst_w_split_flag_ff     <= 1'b1;
-                                addr_w_split_tmp_ff       <= user_w_addr_ff + bytes_until_boundary;
-                                len_w_split_tmp_ff        <= user_w_len_ff - beats_until_boundary;
+                                addr_w_split_tmp_ff       <= user_w_addr_ff + (len_decided * DATA_W_BYTES) - misalign_bytes;
+                                len_w_split_tmp_ff        <= (beats_required - len_decided) - 1;
                             end
 
                             else
@@ -671,11 +695,6 @@ generate
                     begin
                         addr_w_tmp_ff   <= addr_w_split_tmp_ff;
                         len_w_tmp_ff    <= len_w_split_tmp_ff;
-
-                        if(start_w_ff)
-                        begin
-                            burst_w_split_flag_ff     <= 1'b0;
-                        end
                     end
                 end
             end
