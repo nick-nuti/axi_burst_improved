@@ -423,64 +423,59 @@ generate
             end
         end
 
-
-        always_ff @ (posedge aclk)
+// aligner
+        always_ff @(posedge aclk) 
         begin
-            if(~aresetn)
+        if (~aresetn) 
+        begin
+            align_carry_valid_ff <= 1'b0;
+            align_carry_w_data_ff <= '0;
+            align_carry_w_strb_ff <= '0;
+        end
+
+        else if (axi_w_cs==WRITE && m_axi_wready && m_axi_wvalid) 
+        begin
+            align_carry_valid_ff <= (|carry_w_strb);  // your shifted_lo leftover
+            align_carry_w_data_ff <= carry_w_data;    // low bits that didn’t fit
+            align_carry_w_strb_ff <= carry_w_strb;
+        end
+
+        else if (start_w_ff && ~split_carry_valid_ff) 
+        begin
+            align_carry_valid_ff <= 1'b0;  // reset at burst start
+            align_carry_w_data_ff <= '0;
+            align_carry_w_strb_ff <= '0;
+        end
+
+        else if (start_w_ff && split_carry_valid_ff) 
+        begin
+            align_carry_valid_ff <= split_carry_valid_ff;  // burst start after split
+            align_carry_w_data_ff <= split_carry_w_data_ff;
+            align_carry_w_strb_ff <= split_carry_w_strb_ff;
+        end
+    end
+
+// splitter
+        always_ff @(posedge aclk) 
+        begin
+            if (~aresetn) 
             begin
-                w_addr_offset_ff <= 'h0;
-
-                carry_valid_ff <= 'h0;
-                carry_w_data_ff <= 'h0;
-                carry_w_strb_ff <= 'h0;
-
-                burst_split_carry_w_data_ff <= 'h0;
-                burst_split_carry_w_strb_ff <= 'h0;
+                split_carry_valid_ff <= 1'b0;
+                split_carry_w_data_ff <= '0;
+                split_carry_w_strb_ff <= '0;
             end
 
-            else
+            else if ((axi_w_cs == WRITE) && m_axi_wvalid && m_axi_wready && m_axi_wlast && burst_w_split_flag_ff) 
             begin
-                if(start_w_ff && (burst_split_carry_w_strb_ff =='h0))
-                begin
-                    carry_valid_ff <= 'h0;
-                    carry_w_data_ff <= 'h0;
-                    carry_w_strb_ff <= 'h0;
-                end
+                // ISSUE: i don't think this is correct; we only need to carry over the "carry data" to the next split...
+                split_carry_valid_ff <= |carry_w_strb;
+                split_carry_w_data_ff <= carry_w_data;
+                split_carry_w_strb_ff <= carry_w_strb;
+            end
 
-                else if(start_w_ff && (burst_split_carry_w_strb_ff !='h0))
-                begin
-                    carry_w_data_ff <= burst_split_carry_w_data_ff;
-                    carry_w_strb_ff <= burst_split_carry_w_strb_ff;
-                    carry_valid_ff  <= |burst_split_carry_w_strb_ff;
-
-                    burst_split_carry_w_data_ff <= '0;
-                    burst_split_carry_w_strb_ff <= '0;
-                end
-
-                else if(axi_w_cs==WRITE && m_axi_wready && m_axi_wvalid)
-                begin
-                    carry_valid_ff <= (|carry_w_strb);
-                    carry_w_data_ff <= carry_w_data;
-                    carry_w_strb_ff <= carry_w_strb;
-                end
-
-                else if ((axi_w_cs == WRITE) && (m_axi_wvalid && m_axi_wready) && (m_axi_wlast) && burst_w_split_flag_ff) 
-                begin
-                    // shifted_hi at this moment is the spill from this last beat -> belongs to next burst
-                    burst_split_carry_w_data_ff <= carry_w_data;
-                    burst_split_carry_w_strb_ff <= carry_w_strb;
-                end
-            ////
-                if(start_w_ff && (burst_split_carry_w_strb_ff =='h0))
-                begin
-                    w_addr_offset_ff <= 'h0;
-                end
-
-                else if(axi_w_cs==WRITE_CHK_CMD)
-                begin
-                    w_addr_offset_ff <= misalign_bytes;
-                end
-            ////
+            else if (start_w_ff) 
+            begin
+                split_carry_valid_ff <= split_carry_valid_ff;
             end
         end
 
@@ -666,9 +661,6 @@ generate
                 begin
                     if(~burst_w_split_flag_ff)
                     begin
-                        // TODO: do the misalign address stuff here, integrate it into the burst boundary split...
-                            // - handle if misaligned address causes len+1 > max_burst size
-                            // - handle if misaligned address burst goes across page boundaryg (remember still len+1)
 
                         addr_w_tmp_ff   <= user_w_addr_ff & ~(DATA_W_BYTES-1);
                         len_w_tmp_ff    <= len_decided - 1;
