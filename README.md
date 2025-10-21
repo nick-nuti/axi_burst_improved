@@ -1,3 +1,5 @@
 In progress...
 
-Need to convert "//---- COMB + SEQ logic used for basis of error-checking and splitting bursts ----//" section in "abm.sv" to flopped logic instead of combinational before testing
+also still need to:
+- develop ID_CHECK + NUM_OUTSTANDING_WR + NUM_OUTSTANDING_RD
+- develop improved read rtl
