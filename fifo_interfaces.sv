@@ -1,4 +1,7 @@
 
+import axi_pkg::*;
+import axi_master_pkg::*;
+
 // stream_mode:
 // 0: handshake -> req -> clkcycle -> wait for ack -> lower req
 // 1: valid req high -> ack high -> req can stay high to stream data through, ack is combo and will stay high as long as req is high + fifo is not full (for push) or empty (for pop)
