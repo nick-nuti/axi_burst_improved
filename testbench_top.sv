@@ -2,10 +2,14 @@
 
 `include "fifo_interfaces.sv"
 
+import axi_pkg::*;
+import axi_master_pkg::*;
+
 import axi_vip_pkg::*;
 import design_1_axi_vip_0_0_pkg::*;
 
 module testbench_top();
+    reg                           test_start_ready;
     reg                           aclk;
     reg                           aresetn;
     
@@ -24,12 +28,13 @@ module testbench_top();
         axi_ready = 1;
     end
 
+/*
 // IP enables
     parameter WRITE_EN           = 1;
     parameter READ_EN            = 0;
 // AXI definitions
-    parameter ADDR_W             = 32;
-    parameter DATA_W             = 64;
+    parameter ADDR_W             = 64;
+    parameter DATA_W             = 128;
     parameter LEN_W              = 8;
     parameter LOCK_W             = 1;
     parameter QOS_W              = 4;
@@ -53,12 +58,12 @@ module testbench_top();
     parameter DATA_PUSH_STREAM_MODE = 0; // 0 = level sensitive handshake mode, >0 = streaming mode where inputs are taken when (req & req_en)
     parameter RESP_POP_STREAM_MODE  = 0; // 0 = level sensitive handshake mode, >0 = streaming mode where inputs are taken when (req & req_en)
     
-    parameter BYTE = 8;
-    parameter PAGE_SIZE_BYTES_CLOG = $clog2(PAGE_SIZE_BYTES);
-    parameter DATA_W_CLOG = $clog2(DATA_W);
-    parameter DATA_W_BYTES = DATA_W/BYTE;
-    parameter DATA_W_BYTES_CLOG = $clog2(DATA_W_BYTES);
-    parameter STRB_W_CLOG = $clog2(DATA_W_BYTES);
+    localparam BYTE = 8;
+    localparam PAGE_SIZE_BYTES_CLOG = $clog2(PAGE_SIZE_BYTES);
+    localparam DATA_W_CLOG = $clog2(DATA_W);
+    localparam DATA_W_BYTES = DATA_W/BYTE;
+    localparam DATA_W_BYTES_CLOG = $clog2(DATA_W_BYTES);
+    localparam STRB_W_CLOG = $clog2(DATA_W_BYTES);
     
     parameter STRB_W           = DATA_W_BYTES;
     parameter ASIZE_W          = DATA_W_BYTES_CLOG;
@@ -68,7 +73,7 @@ module testbench_top();
     localparam WR_CMD_W = ADDR_W + LEN_W + ASIZE_W + ID_W;
     localparam WR_DATA_W = DATA_W + STRB_W;
     localparam WR_RESP_W = RESP_W + ID_W;
-
+*/
 /**************** Write Address Channel Signals ****************/
     wire [ADDR_W-1:0]             m_axi_awaddr;    // address
     wire [PROT_W-1:0]             m_axi_awprot;    // protection - privilege and securit level of transaction
@@ -116,38 +121,44 @@ module testbench_top();
     wire [RESP_W-1:0]             m_axi_rresp;     // read response - status of the read transaction (00 = okay, 01 = exokay, 10 = slverr, 11 = decerr)
 /**************** User Control Signals ****************/
     
-    typedef struct packed
-    {
-        logic [(ADDR_W-1):0]     address;
-        logic [(LEN_W-1):0]      awlen;
-        logic [(ASIZE_W-1):0]    awsize;
-        logic [(ID_W-1):0]       awid;
-    } wr_cmd_type;
-    
-    wr_cmd_type write_cmd;
-    
-    typedef struct packed
-    {
-        logic [(DATA_W-1):0]     wdata;
-        logic [(STRB_W-1):0]     wstrb;
-    } wr_data_type;
-    
-    wr_data_type write_data;
-    
-    typedef struct packed
-    {
-        logic [(RESP_W-1):0]     bresp;
-        logic [(ID_W-1):0]       bid;
-    } wr_resp_type;
-    
+    wr_cmd_type write_cmd [];
+    wr_data_type write_data [];
     wr_resp_type write_resp;
     
     fifo_push_if #(.T(wr_cmd_type))   write_fifo_cmd_in_intf (.clk(aclk), .rstn(aresetn));
     fifo_push_if #(.T(wr_data_type))  write_fifo_data_in_intf (.clk(aclk), .rstn(aresetn));
     fifo_pop_if  #(.T(wr_resp_type))  write_fifo_resp_out_intf (.clk(aclk), .rstn(aresetn));
     
+
+    task automatic fill_axi_commands();
+        wr_cmd_type write_cmd_temp;
+        wr_data_type write_data_temp;
+        
+        write_cmd_temp.address = 'h1000000000000;
+        write_cmd_temp.awlen = 255;
+        write_cmd_temp.awsize = $clog2(DATA_W/8);
+        write_cmd_temp.awid = 1;
+        write_cmd.push_back(write_cmd_temp);
+        
+        foreach(write_cmd[i])
+        begin
+            for(j = 0; j <= write_cmd[i].awlen; j++)
+            begin
+                write_data_temp.wdata = 'hF000000000000000 + j;
+                write_data_temp.wstrb = {STRB_W{1'b1}};
+                write_data.push_back(write_data_temp);
+            end
+        end
+    endtask
+    
+    task automatic test_start();
+        push_fifo(wr_cmd_push_if.master, write_cmd, 1);
+        push_fifo(wr_data_push_if.master, write_data, write_cmd.awlen);
+    endtask
+    
     initial
     begin
+        test_start_ready = 0;
         aclk = 0;
         aresetn = 0;
     
@@ -176,6 +187,15 @@ module testbench_top();
         #5us;
         aresetn = 1;
         #10us;
+        
+        fill_axi_commands();        
+        test_start();
+        
+        pop_fifo(wr_resp_pop_if.master, write_resp, 1);
+        
+       #100us;
+       
+       $finish;
     end
     
     always
