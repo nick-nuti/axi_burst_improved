@@ -1,9 +1,7 @@
 `timescale 1ns / 1ps
 
-`include "fifo_interfaces.sv"
-
-import axi_pkg::*;
 import axi_master_pkg::*;
+import fifo_pkg::*;
 
 import axi_vip_pkg::*;
 import design_1_axi_vip_0_0_pkg::*;
@@ -121,39 +119,49 @@ module testbench_top();
     wire [RESP_W-1:0]             m_axi_rresp;     // read response - status of the read transaction (00 = okay, 01 = exokay, 10 = slverr, 11 = decerr)
 /**************** User Control Signals ****************/
     
-    wr_cmd_type write_cmd [];
-    wr_data_type write_data [];
-    wr_resp_type write_resp;
+    wr_cmd_type write_cmd; 
+    logic [WR_CMD_W-1:0] write_cmd_concat [$]; // queue
+    wr_data_type write_data;
+    logic [WR_DATA_W-1:0] write_data_concat [$]; // queue
+    wr_resp_type write_resp, write_resp_print;
+    logic [WR_RESP_W-1:0] write_resp_concat [$];
     
-    fifo_push_if #(.T(wr_cmd_type))   write_fifo_cmd_in_intf (.clk(aclk), .rstn(aresetn));
-    fifo_push_if #(.T(wr_data_type))  write_fifo_data_in_intf (.clk(aclk), .rstn(aresetn));
-    fifo_pop_if  #(.T(wr_resp_type))  write_fifo_resp_out_intf (.clk(aclk), .rstn(aresetn));
+    fifo_push_if #(.WIDTH(WR_CMD_W))   write_fifo_cmd_in_intf (.clk(aclk), .rstn(aresetn));
+    fifo_push_if #(.WIDTH(WR_DATA_W))  write_fifo_data_in_intf (.clk(aclk), .rstn(aresetn));
+    fifo_pop_if  #(.WIDTH(WR_RESP_W))  write_fifo_resp_out_intf (.clk(aclk), .rstn(aresetn));
     
-
     task automatic fill_axi_commands();
         wr_cmd_type write_cmd_temp;
         wr_data_type write_data_temp;
+        
+        logic [WR_CMD_W-1:0] write_cmd_concat_bits;
+        logic [WR_DATA_W-1:0] write_data_concat_bits;
         
         write_cmd_temp.address = 'h1000000000000;
         write_cmd_temp.awlen = 255;
         write_cmd_temp.awsize = $clog2(DATA_W/8);
         write_cmd_temp.awid = 1;
-        write_cmd.push_back(write_cmd_temp);
         
-        foreach(write_cmd[i])
+        write_cmd_concat.push_back(write_cmd_temp);
+                                            
+        foreach(write_cmd_concat[i])
         begin
-            for(j = 0; j <= write_cmd[i].awlen; j++)
+            for(int j = 0; j <= write_cmd_concat[i][WR_CMD_W-ADDR_W -: LEN_W]; j++)
             begin
                 write_data_temp.wdata = 'hF000000000000000 + j;
                 write_data_temp.wstrb = {STRB_W{1'b1}};
-                write_data.push_back(write_data_temp);
+                
+                write_data_concat.push_back(write_data_temp);
             end
         end
     endtask
     
     task automatic test_start();
-        push_fifo(wr_cmd_push_if.master, write_cmd, 1);
-        push_fifo(wr_data_push_if.master, write_data, write_cmd.awlen);
+        
+        int index = 0;
+    
+        write_fifo_cmd_in_intf.push_fifo(write_cmd_concat, 1);
+        write_fifo_data_in_intf.push_fifo(write_data_concat, write_cmd_concat[index][WR_CMD_W-ADDR_W -: LEN_W]);
     endtask
     
     initial
@@ -170,19 +178,14 @@ module testbench_top();
         write_fifo_resp_out_intf.stream_mode    = RESP_POP_STREAM_MODE;
         
         // WRITE FIFO INTERFACE - ZERO OUT 
-        write_fifo_cmd_in_intf.master.req = 'h0;
-        write_fifo_cmd_in_intf.master.data_in.address = 'h0;
-        write_fifo_cmd_in_intf.master.data_in.awlen = 'h0;
-        write_fifo_cmd_in_intf.master.data_in.awsize = 'h0;
-        write_fifo_cmd_in_intf.master.data_in.awid = 'h0;
+        write_fifo_cmd_in_intf.req = 'h0;
+        write_fifo_cmd_in_intf.data_in = 'h0;
     
-        write_fifo_data_in_intf.master.req = 'h0;
-        write_fifo_data_in_intf.master.wdata = 'h0;
-        write_fifo_data_in_intf.master.wstrb = 'h0;
+        write_fifo_data_in_intf.req = 'h0;
+        write_fifo_data_in_intf.data_in = 'h0;
 
-        write_fifo_resp_out_intf.master.req = 'h0;
-        write_fifo_resp_out_intf.master.data_out.bresp = 'h0;
-        write_fifo_resp_out_intf.master.data_out.bid = 'h0;
+        write_fifo_resp_out_intf.req = 'h0;
+        write_fifo_resp_out_intf.data_out = 'h0;
         
         #5us;
         aresetn = 1;
@@ -191,7 +194,10 @@ module testbench_top();
         fill_axi_commands();        
         test_start();
         
-        pop_fifo(wr_resp_pop_if.master, write_resp, 1);
+        write_fifo_resp_out_intf.pop_fifo(write_resp_concat, 1);
+        write_resp_print = write_resp_concat[0];
+        
+        $display("RECEIVED WRITE RESPONSE: BRESP = 0x%X BID = 0x%X", write_resp_print.bresp, write_resp_print.bid);
         
        #100us;
        
@@ -210,6 +216,10 @@ module testbench_top();
         pop_fifo(wr_resp_pop_if.master, my_resp_array, num_entries);
     end
     */
+    
+    assign write_cmd = write_fifo_cmd_in_intf.data_in;
+    assign write_data = write_fifo_data_in_intf.data_in;
+    assign write_fifo_resp_out_intf.data_out = write_resp;
 
     abm_w_fifo #(
     // IP enables
@@ -285,33 +295,33 @@ module testbench_top();
         .aclk(aclk),
         .aresetn(aresetn),
     
-        .wr_cmd_push_req(write_fifo_cmd_in_intf.slave.req),
-        .wr_cmd_push_struct_address(write_fifo_cmd_in_intf.slave.data_in.address),
-        .wr_cmd_push_struct_awlen(write_fifo_cmd_in_intf.slave.data_in.awlen),
-        .wr_cmd_push_struct_awsize(write_fifo_cmd_in_intf.slave.data_in.awsize),
-        .wr_cmd_push_struct_awid(write_fifo_cmd_in_intf.slave.data_in.awid),
-        .wr_cmd_push_ack(write_fifo_cmd_in_intf.slave.ack),
+        .wr_cmd_push_req(write_fifo_cmd_in_intf.req),
+        .wr_cmd_push_struct_address(write_cmd.address),
+        .wr_cmd_push_struct_awlen(write_cmd.awlen),
+        .wr_cmd_push_struct_awsize(write_cmd.awsize),
+        .wr_cmd_push_struct_awid(write_cmd.awid),
+        .wr_cmd_push_ack(write_fifo_cmd_in_intf.ack),
     
-        .wr_cmd_fifo_full(write_fifo_cmd_in_intf.slave.fifo_full),
+        .wr_cmd_fifo_full(write_fifo_cmd_in_intf.fifo_full),
         .wr_cmd_fifo_empty(),
         .wr_cmd_fifo_count(),
     
-        .wr_data_push_req(write_fifo_data_in_intf.slave.req),
-        .wr_data_push_struct_wdata(write_fifo_data_in_intf.slave.wdata),
-        .wr_data_push_struct_wstrb(write_fifo_data_in_intf.slave.wstrb),
-        .wr_data_push_ack(write_fifo_data_in_intf.slave.ack),
+        .wr_data_push_req(write_fifo_data_in_intf.req),
+        .wr_data_push_struct_wdata(write_data.wdata),
+        .wr_data_push_struct_wstrb(write_data.wstrb),
+        .wr_data_push_ack(write_fifo_data_in_intf.ack),
     
-        .wr_data_fifo_full(write_fifo_data_in_intf.slave.fifo_full),
+        .wr_data_fifo_full(write_fifo_data_in_intf.fifo_full),
         .wr_data_fifo_empty(),
         .wr_data_fifo_count(),
        
-        .wr_resp_pop_req(write_fifo_resp_out_intf.slave.req),
-        .wr_resp_pop_struct_bresp(write_fifo_resp_out_intf.slave.data_out.bresp),
-        .wr_resp_pop_struct_bid(write_fifo_resp_out_intf.slave.data_out.bid),
-        .wr_resp_pop_ack(write_fifo_resp_out_intf.slave.ack),
+        .wr_resp_pop_req(write_fifo_resp_out_intf.req),
+        .wr_resp_pop_struct_bresp(write_resp.bresp),
+        .wr_resp_pop_struct_bid(write_resp.bid),
+        .wr_resp_pop_ack(write_fifo_resp_out_intf.ack),
     
         .wr_resp_fifo_full(),
-        .wr_resp_fifo_empty(write_fifo_resp_out_intf.slave.fifo_empty),
+        .wr_resp_fifo_empty(write_fifo_resp_out_intf.fifo_empty),
         .wr_resp_fifo_count()
     );
     
