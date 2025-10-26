@@ -375,6 +375,7 @@ module abm_w_fifo #(
         .m_axi_bresp(m_axi_bresp),
         .m_axi_bvalid(m_axi_bvalid),
         .m_axi_bready(m_axi_bready),
+        .m_axi_bid(m_axi_bid),
         /**************** Read Address Channel Signals ****************/
         .m_axi_araddr(m_axi_araddr),
         .m_axi_arprot(m_axi_arprot),
@@ -423,7 +424,7 @@ module abm_w_fifo #(
         .user_w_cmd_error(), // out
         .user_w_underrun_event(), // out
     //write data fifo
-        .user_w_data_fifo_cnt(wr_data_fifo_cnt),
+        .user_w_data_fifo_cnt(wr_data_fifo_count),
         .user_w_data_fifo_empty(wr_data_fifo_empty),
     // read cmd
         .user_r_start('h0),
