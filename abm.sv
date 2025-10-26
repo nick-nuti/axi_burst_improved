@@ -43,7 +43,7 @@ module axi_burst_master #(
 
 // IP specific definitions
     parameter PAGE_SIZE_BYTES       = 4096,
-    parameter SPLIT_PAGE_BOUNDARY   = 1, // 0: end burst at page boundary, >0: split burst at page boundary
+    parameter SPLIT_PAGE_BOUNDARY   = 0, // 0: end burst at page boundary, >0: split burst at page boundary
     parameter BURST_POLICY          = 0, // 0: (safe) require full burst upfront, 1: stream, wait until data is present by lowering wvalid, 2: pad with dummy data if fifo empty
     parameter MISALIGN_ADJUST       = 0, // 0: disallow (results in error), >0: allow
     parameter ID_CHECK              = 0  // 0: id checking error disabled, >0: id checking error enabled
@@ -165,13 +165,13 @@ module axi_burst_master #(
 /**************** Write Response Channel Signals ****************/
     input  logic [RESP_W-1:0]            m_axi_bresp;     // write response - status of the write transaction (00 = okay, 01 = exokay, 10 = slverr, 11 = decerr)
     input  logic                         m_axi_bvalid;    // write response valid - 0 = response not valid, 1 = response is valid
-    output reg                          m_axi_bready;    // write response ready - 0 = not ready, 1 = ready
+    output reg                           m_axi_bready;    // write response ready - 0 = not ready, 1 = ready
     input  logic [ID_W-1:0]              m_axi_bid;
 /**************** Read Address Channel Signals ****************/
     output reg [ADDR_W-1:0]             m_axi_araddr;    // read address
     output reg [PROT_W-1:0]             m_axi_arprot;    // protection - privilege and securit level of transaction
     output reg                          m_axi_arvalid;   // 
-    input  logic                         m_axi_arready;   // 
+    input  logic                        m_axi_arready;   // 
     output reg [ASIZE_W-1:0]            m_axi_arsize;    //3'b100, // burst beat size - size of each transfer in the burst 3'b100 for 16 bytes/ 128 bit
     output reg [ABURST_W-1:0]           m_axi_arburst;   // fixed burst = 00, incremental = 01, wrapped burst = 10
     output reg [CACHE_W-1:0]            m_axi_arcache;   // cache type - how transaction interacts with caches
@@ -216,7 +216,7 @@ module axi_burst_master #(
     output logic [3:0]                   user_w_cmd_error; // 00:OKAY, 01:NOROOM (1 beat can't fit before next page boundary), 
     output logic                         user_w_underrun_event;
 //write fifo
-    input  logic [LEN_W-1:0]             user_w_data_fifo_cnt;
+    input  logic [LEN_W:0]               user_w_data_fifo_cnt; // increased the size by 1...
     input  logic                         user_w_data_fifo_empty;
     //output logic                         user_w_data_pop_req;
 //read cmd
@@ -230,7 +230,7 @@ module axi_burst_master #(
 //read fifo
     input  logic [LEN_W-1:0]             user_r_fifo_cnt;
     input  logic                         user_r_fifo_full;
-    output reg                          user_r_data_push_req;
+    output reg                           user_r_data_push_req;
 /*******************************************************/
 
 // AXI W ---------------------------------------------------
@@ -255,7 +255,8 @@ generate
         logic [ADDR_W-1:0]      addr_w_split_tmp_ff;
         logic [LEN_W-1:0]       len_w_split_tmp_ff;
         logic [ADDR_W-1:0]      bytes_until_boundary;
-        logic [LEN_W-1:0]       beats_until_boundary;
+        //logic [LEN_W-1:0]       beats_until_boundary;
+        logic [ADDR_W-1:0]       beats_until_boundary;
         logic [LEN_W-1:0]       awlen_until_boundary;
         logic [3:0]             error_wrap;
         logic                   error_redux_or;
@@ -366,6 +367,9 @@ generate
             m_axi_bready   = 'h0;
             //user_w_data_pop_req = 'h0;
             user_w_wready = 'h0;
+            user_w_bid = 'h0;
+            user_w_status = 'h0;
+            user_w_bvalid = 'h0;
 
             if(axi_w_cs==WRITE_ADDRESS)
             begin
@@ -425,7 +429,7 @@ generate
     // TODO
     reg  [DATA_W_BYTES_CLOG-1:0]    w_addr_offset_ff;
 
-    reg carry_valid_ff;
+    //reg carry_valid_ff;
     reg [DATA_W-1:0] carry_w_data_ff;
     reg [STRB_W-1:0] carry_w_strb_ff;
 
@@ -725,7 +729,7 @@ generate
 
             error_wrap = {
                             (MISALIGN_ADJUST == 0) && start_w_addr_misalign_flag, 
-                            (BURST_POLICY > 0) && insufficient_wdata_flag, 
+                            (BURST_POLICY == 0) && insufficient_wdata_flag, 
                             (SPLIT_PAGE_BOUNDARY == 0) && page_boundary_cross_no_split_flag,
                             no_beats_fit_flag
                         };
@@ -734,6 +738,7 @@ generate
 
         // len decision
             len_decided = (page_boundary_cross_no_split_flag) ? awlen_until_boundary : ((beats_required > (MAX_BURST_BEATS-1)) ? MAX_BURST_BEATS-1 : user_w_len_ff);
+            
         end
 
         always_ff @ (posedge aclk)
