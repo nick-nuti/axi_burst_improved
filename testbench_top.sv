@@ -130,6 +130,8 @@ module testbench_top();
     fifo_push_if #(.WIDTH(WR_DATA_W))  write_fifo_data_in_intf (.clk(aclk), .rstn(aresetn));
     fifo_pop_if  #(.WIDTH(WR_RESP_W))  write_fifo_resp_out_intf (.clk(aclk), .rstn(aresetn));
     
+    int j, data_cnt, i;
+    
     task automatic fill_axi_commands();
         wr_cmd_type write_cmd_temp;
         wr_data_type write_data_temp;
@@ -143,10 +145,12 @@ module testbench_top();
         write_cmd_temp.awid = 1;
         
         write_cmd_concat.push_back(write_cmd_temp);
-                                            
+        
+        data_cnt = write_cmd_concat[i][(WR_CMD_W-1)-ADDR_W -: (LEN_W)];
+                      
         foreach(write_cmd_concat[i])
         begin
-            for(int j = 0; j <= write_cmd_concat[i][WR_CMD_W-ADDR_W -: LEN_W]; j++)
+            for(j = 0; j <= data_cnt; j++)
             begin
                 write_data_temp.wdata = 'hF000000000000000 + j;
                 write_data_temp.wstrb = {STRB_W{1'b1}};
@@ -154,14 +158,16 @@ module testbench_top();
                 write_data_concat.push_back(write_data_temp);
             end
         end
+        
+        #100us;
     endtask
     
     task automatic test_start();
         
         int index = 0;
-    
+        
+        write_fifo_data_in_intf.push_fifo(write_data_concat, data_cnt+1);
         write_fifo_cmd_in_intf.push_fifo(write_cmd_concat, 1);
-        write_fifo_data_in_intf.push_fifo(write_data_concat, write_cmd_concat[index][WR_CMD_W-ADDR_W -: LEN_W]);
     endtask
     
     initial
