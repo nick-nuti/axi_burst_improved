@@ -32,13 +32,13 @@ interface fifo_push_if #(
                 begin
                     for(int i = 0; i < num_entries; i++)
                     begin
-                        data_in <= data_in_array[i];
-                        
-                        req <= 1'b1;
-                        wait(ack);
-                        req <= 1'b0;
-                        
+                        data_in = data_in_array[i];
                         @(posedge clk);
+                        req = 1'b1;
+                        wait(ack);
+                        @(posedge clk);
+                        req = 1'b0;
+                        wait(~ack);
                     end
                 end
                 
@@ -94,13 +94,13 @@ interface fifo_pop_if #(
                 begin
                     for(int i = 0; i < num_entries; i++)
                     begin
-                        req <= 1'b1;
-                        
+                        @(posedge clk);
+                        req = 1'b1;
                         wait(ack);
-                        req <= 1'b0;
-                        
+                        @(posedge clk);
+                        req = 1'b0;
                         data_out_array.push_back(data_out);
-                        
+                        wait(~ack);
                         @(posedge clk);
                     end
                 end
