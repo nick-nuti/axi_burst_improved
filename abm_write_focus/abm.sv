@@ -1,27 +1,30 @@
 
 // SIGNALS NOT CURRENTLY USED:
-    // AXI-ID   : ARID->RID, AWID->BID , identifies transaction so responses can be matched to the requester. This is for if a master allows queuing of multiple outstanding bursts
-    // LOCK     : AWLOCK/ARLOCK , locked transactions (exclusive)
-    // QOS      : AWQOS/ARQOS , priority hint for arbiter
-    // REGION   : AWREGION/ARREGION , extra routing bits for complex interconnects
-    // CACHE + PROT , cacheability and protection hints, usually for DMA/master
+    // LOCK     : AWLOCK/ARLOCK , locked transactions (exclusive) ; only useful for atomic operations (DRAM doesn't use this?)
+    // QOS      : AWQOS/ARQOS , priority hint for arbiter; useful for multiple masters competing for DRAM
+    // REGION   : AWREGION/ARREGION , extra routing bits for complex interconnects; apparently for multi-SoC systems with complex routing
+    // CACHE    : awcache/arcache , cacheability hint (bufferable, modifiable); DRAM apparently ties this to 0011 (normal non-cacheable bufferable) or 0010 (non-cacheable) 
+    // PROT     : awprot/arprot , typically 000 unless implementing privilege domains
 
 // FUTURE REQUIREMENTS
     // command fifo: {awid, awaddr, awlen, awsize, awburst, awprot, awcache, awqos, awregion}
     // data fifo: {wdata, wstrb}
     // resp fifo: {bresp, bid}
-
-    // misaligned addr adjustment
-    // narrow burst: yes, if someone changes AWSIZE at somepoint then keep the data_w size the same and just use write strobe accordingly
-        // only allow this for AXI3
-
-    // maybe use ID, lock, QoS, cache, prot
-
-    // BURST type: wrapping, fixed
     
-    // AWUSER, WUSER, BUSER, ARUSER, RUSER
+// NEED TO DO:
+    // I may need to make an AXI-smart connect type of IP that can multiplex multiple IP master ports
+        // this is where ID_CHECK + number outstanding requests would make sense
+        // ID CHECK:
+            // - this is only needed if system doesn't wait for bresp (repeatedly send bursts)
+            // - would require ID tracking, number writes outstanding
+            // - this allows "out of order transaction responses"
+            // - IF command processor, memory scheduler (all of them share one master)... start issuing multiple bursts per engine then yes this is required
 
-    // with ID support "number outstanding R/W"
+    // WRITE:
+        // - need to add ID check error that's always active (compares awid to bid and if these don't match then error out)
+        // - still need to do verification for misaligned address, split burst, each different burst policy, and (misaligned address + split burst)
+    // READ:
+        // - everything
 
 module axi_burst_master #(
 // IP enables
@@ -233,6 +236,33 @@ module axi_burst_master #(
     output reg                           user_r_data_push_req;
 /*******************************************************/
 
+// ---- Misaligned Address ---- //
+reg  [DATA_W_BYTES_CLOG-1:0]    w_addr_offset_ff;
+
+reg [DATA_W-1:0] carry_w_data_ff;
+reg [STRB_W-1:0] carry_w_strb_ff;
+
+logic [DATA_W-1:0] aligned_w_data;
+logic [DATA_W-1:0] carry_w_data;
+logic [DATA_W-1:0] aligned_w_data_final;
+logic [STRB_W-1:0] aligned_w_strb;
+logic [STRB_W-1:0] carry_w_strb;
+logic [STRB_W-1:0] aligned_w_strb_final;
+
+logic [DATA_W_CLOG-1:0] w_data_shift_left;
+logic [DATA_W_CLOG-1:0] w_data_shift_right;
+
+logic [STRB_W_CLOG-1:0] w_strb_shift_left;
+logic [STRB_W_CLOG-1:0] w_strb_shift_right;
+// aligner
+logic                  align_carry_valid_ff;
+logic [DATA_W-1:0]     align_carry_w_data_ff;
+logic [DATA_W/8-1:0]   align_carry_w_strb_ff;
+// splitter
+logic                  split_carry_valid_ff;
+logic [DATA_W-1:0]     split_carry_w_data_ff;
+logic [DATA_W/8-1:0]   split_carry_w_strb_ff;
+
 // AXI W ---------------------------------------------------
 generate
     if(WRITE_EN)
@@ -427,154 +457,21 @@ generate
             end
         end
 
-// ---- Misaligned Address ---- //
-    // TODO
-    reg  [DATA_W_BYTES_CLOG-1:0]    w_addr_offset_ff;
-
-    //reg carry_valid_ff;
-    reg [DATA_W-1:0] carry_w_data_ff;
-    reg [STRB_W-1:0] carry_w_strb_ff;
-
-    logic [DATA_W-1:0] aligned_w_data;
-    logic [DATA_W-1:0] carry_w_data;
-    logic [DATA_W-1:0] aligned_w_data_final;
-    logic [STRB_W-1:0] aligned_w_strb;
-    logic [STRB_W-1:0] carry_w_strb;
-    logic [STRB_W-1:0] aligned_w_strb_final;
-
-    logic [DATA_W_CLOG-1:0] w_data_shift_left;
-    logic [DATA_W_CLOG-1:0] w_data_shift_right;
-
-    logic [STRB_W_CLOG-1:0] w_strb_shift_left;
-    logic [STRB_W_CLOG-1:0] w_strb_shift_right;
-
-    // Requirement:
-        // - sequential logic for holding carry out data
-            // carry valid (check wstrb bits)
-            // carry data AND strb (flop the right-shifted signals for use in the next beat)
-        // - combinational logic for w_data input shifting
-            // shift data AND strb left (this becomes the data to use)
-            // shift data AND strb right (this becomes the carry out)
-
-            // aligned data + strb out that goes to the axi signals
-
-    // EX:
-        // 1. find the address offset + increase len -> len + 1
-            // - detect if split burst is required (cross page boundary and/or len+1 > MAX_BURST_LEN)
-        // 2. use the address offset to calculate:
-            // - carry_out = (write data >> (address offset*8))
-            // - data_to_use = (write data << (address offset*8))
-        // 3. flop the carry out + write "data_to_use" to the w_data axi signal
-            // flop : carry_out_ff <= carry_out
-            // comb : m_axi_wdata = carry_out_ff | data_to_use;
-        // 4. wlast
-            // -> if split burst then we are required to carry data + wstrb  over to the next burst
-            // -> if not:
-                // comb : m_axi_wdata = carry_out_ff | 'h0;
-
-        always_comb
+//---- Burst write beat counter for FSM ----//
+        always_ff @ (posedge aclk)
         begin
-            w_data_shift_left = (w_addr_offset_ff * BYTE);
-            w_data_shift_right = (DATA_W - w_data_shift_left);
-
-            w_strb_shift_left = (w_addr_offset_ff);
-            w_strb_shift_right = (DATA_W_BYTES - w_strb_shift_left);
-
-            if(w_addr_offset_ff == 0)
+            if(axi_w_cs == WRITE_IDLE || axi_w_cs == WRITE_RESPONSE) w_data_counter <= 'h0;
+            
+            else if(axi_w_cs == WRITE && m_axi_wready && m_axi_wvalid)//w_data_counter < len_w_tmp_ff)
             begin
-                aligned_w_data  =  user_w_data;
-                carry_w_data    =  'h0;
-                aligned_w_strb  =  user_w_strb;
-                carry_w_strb    =  'h0;
+                w_data_counter <= w_data_counter + 1'b1;
             end
-
-            else
-            begin
-                aligned_w_data  =  (user_w_data << (w_data_shift_left));
-                carry_w_data    =  (user_w_data >> (w_data_shift_right));
-
-                aligned_w_strb  =  (user_w_strb << (w_strb_shift_left));
-                carry_w_strb    =  (user_w_strb >> (w_strb_shift_right));
-            end
-        end
-
-// aligner
-        logic                  align_carry_valid_ff;
-        logic [DATA_W-1:0]     align_carry_w_data_ff;
-        logic [DATA_W/8-1:0]   align_carry_w_strb_ff;
-
-        always_ff @(posedge aclk) 
-        begin
-        if (~aresetn) 
-        begin
-            align_carry_valid_ff <= 1'b0;
-            align_carry_w_data_ff <= '0;
-            align_carry_w_strb_ff <= '0;
-        end
-
-        else if (start_w_ff && burst_w_split_flag_ff) 
-        begin
-            align_carry_valid_ff <= split_carry_valid_ff;  // burst start after split
-            align_carry_w_data_ff <= split_carry_w_data_ff;
-            align_carry_w_strb_ff <= split_carry_w_strb_ff;
-        end
-
-        else if (start_w_ff && ~burst_w_split_flag_ff) 
-        begin
-            align_carry_valid_ff <= 1'b0;  // reset at burst start
-            align_carry_w_data_ff <= '0;
-            align_carry_w_strb_ff <= '0;
-        end
-
-        else if (axi_w_cs==WRITE && m_axi_wready && m_axi_wvalid) 
-        begin
-            align_carry_valid_ff <= (|carry_w_strb);  // your shifted_lo leftover
-            align_carry_w_data_ff <= carry_w_data;    // low bits that didn't fit
-            align_carry_w_strb_ff <= carry_w_strb;
-        end
-    end
-
-// splitter
-        logic                  split_carry_valid_ff;
-        logic [DATA_W-1:0]     split_carry_w_data_ff;
-        logic [DATA_W/8-1:0]   split_carry_w_strb_ff;
-
-        always_ff @(posedge aclk) 
-        begin
-            if (~aresetn) 
-            begin
-                split_carry_valid_ff <= 1'b0;
-                split_carry_w_data_ff <= '0;
-                split_carry_w_strb_ff <= '0;
-            end
-
-            else if ((axi_w_cs == WRITE) && m_axi_wvalid && m_axi_wready && m_axi_wlast && burst_w_split_flag_ff) 
-            begin
-                split_carry_valid_ff <= |carry_w_strb;
-                split_carry_w_data_ff <= carry_w_data;
-                split_carry_w_strb_ff <= carry_w_strb;
-            end
-
-            else if (start_w_ff && ~burst_w_split_flag_ff) 
-            begin
-                split_carry_valid_ff <= 'h0;  // burst start after split
-                split_carry_w_data_ff <= 'h0;
-                split_carry_w_strb_ff <= 'h0;
-            end
-        end
-
-        always_comb
-        begin
-            aligned_w_data_final = 'h0;
-            aligned_w_strb_final = 'h0;
-
-            aligned_w_data_final = ((align_carry_valid_ff) ? align_carry_w_data_ff : 'h0)| aligned_w_data;
-            aligned_w_strb_final = ((align_carry_valid_ff) ? align_carry_w_strb_ff : 'h0)| aligned_w_strb;
-
-            // need to save the 'carry_w_data_ff' and 'carry_w_strb_ff' if 'burst_w_split_flag_ff' flag is set
+            
+            else w_data_counter <= w_data_counter;
         end
 
 // ---- Underrun flag ---- //
+        // All underrun tells us is if there's a time whenever the input fifo was empty during a burst
         always_ff @ (posedge aclk)
         begin
             if(~aresetn)
@@ -608,7 +505,31 @@ generate
 
         assign user_w_underrun_event = underrun_flag_ff;
 
-// ---- Start + 1-stage pipeline + automatic start for cmd boundary split mechanism ---- //
+// ---- Error Flop set and clr for output port ---- //
+        assign user_w_cmd_error     = user_w_cmd_error_ff;
+
+        always_ff @ (posedge aclk)
+        begin
+            if(~aresetn)
+            begin
+                user_w_cmd_error_ff <= 'h0;
+            end
+
+            else
+            begin
+                if(start_w_ff)
+                begin
+                    user_w_cmd_error_ff <= 'h0;
+                end
+
+                else if(axi_w_cs==WRITE_CHK_CMD)
+                begin
+                    user_w_cmd_error_ff <= error_wrap;
+                end
+            end
+        end
+
+// 1. ---- Start + 1-stage pipeline + automatic start for cmd boundary split mechanism ---- //
         assign start_write  = (~error_redux_or) & start_w_ff;
 
         always_ff @ (posedge aclk)
@@ -630,8 +551,6 @@ generate
             begin
                 if(ready_w_flag)
                 begin
-                    // TODO: misaligned address causes a split burst (1. across boundary, 2. len+1 > MAX_BURST_LEN, 3. both)
-
                     if((SPLIT_PAGE_BOUNDARY > 0) && burst_w_split_flag_ff)
                     begin
                         ready_w_flag      <= 0;
@@ -660,21 +579,8 @@ generate
                 end
             end
         end
-        
-//---- Burst write beat counter for FSM ----//
-        always_ff @ (posedge aclk)
-        begin
-            if(axi_w_cs == WRITE_IDLE || axi_w_cs == WRITE_RESPONSE) w_data_counter <= 'h0;
-            
-            else if(axi_w_cs == WRITE && m_axi_wready && m_axi_wvalid)//w_data_counter < len_w_tmp_ff)
-            begin
-                w_data_counter <= w_data_counter + 1'b1;
-            end
-            
-            else w_data_counter <= w_data_counter;
-        end
 
-//---- COMB + SEQ logic used for basis of error-checking and splitting bursts ----//
+// 2. ---- COMB logic used for basis of error-checking and splitting bursts ----//
         always_comb
         begin
         // misaligned address
@@ -743,10 +649,10 @@ generate
 
         // REMEMBER: difference between awlen and beats is (awlen = beats - 1)
 
-        // awlen split
+        // awlen split: after first burst, how many beats remain
             if(SPLIT_PAGE_BOUNDARY > 0)
             begin
-                if(beats_required > beats_decided)
+                if(beats_required > beats_decided) // if beats_decided was set to "beats_until_boundary" or "MAX_BURST_BEATS"
                 begin
                     awlen_split = (beats_required - beats_decided) - 1;
                 end
@@ -763,6 +669,7 @@ generate
             end
         end
 
+// 3. ---- SEQ logic used for first burst addr + awlen (account for misalignment, max burst beats limit, page boundary) ; gets data from '2. COMB logic'^ ----//
         always_ff @ (posedge aclk)
         begin
             if(~aresetn)
@@ -781,17 +688,18 @@ generate
                 begin
                     if(~burst_w_split_flag_ff)
                     begin
-
+                        // These go directly to the axi slave
                         addr_w_tmp_ff   <= user_w_addr_ff & ~(DATA_W_BYTES-1);  // automatically aligning the address to the closest previous beat boundary
                         len_w_tmp_ff    <= awlen_decided;
 
                         if(SPLIT_PAGE_BOUNDARY > 0)
                         begin
-                            if(beats_required > beats_decided)
+                            if(beats_required > beats_decided) // if awlen was split
                             begin
+                                // items to be used in the burst after the burst split
                                 burst_w_split_flag_ff     <= 1'b1;
-                                addr_w_split_tmp_ff       <= user_w_addr_ff + (beats_decided * DATA_W_BYTES) & ~(DATA_W_BYTES-1);
-                                len_w_split_tmp_ff        <= awlen_split;
+                                addr_w_split_tmp_ff       <= user_w_addr_ff + (beats_decided * DATA_W_BYTES) & ~(DATA_W_BYTES-1);  // starting address of starting burst after the split
+                                len_w_split_tmp_ff        <= awlen_split; // awlen after the split
                             end
 
                             else
@@ -822,6 +730,119 @@ generate
             end
         end
 
+// 4. ---- Misaligned Address ---- //
+    // if address is not byte aligned with the beat size then we must align the starting address and therefore change each beat of the burst...
+
+        // COMB logic to calculate aligned shift left and carry shift right (this happens once ber burst)
+        always_comb
+        begin
+            // shift amount for aligned data in current beat
+            w_data_shift_left = (w_addr_offset_ff * BYTE);
+            w_strb_shift_left = (w_addr_offset_ff);
+
+            // shift amount for carry data to be used in next beat
+            w_data_shift_right = (DATA_W - w_data_shift_left);
+            w_strb_shift_right = (DATA_W_BYTES - w_strb_shift_left);
+            
+            // no misalignment, don't edit the data
+            if(w_addr_offset_ff == 0)
+            begin
+                aligned_w_data  =  user_w_data;
+                aligned_w_strb  =  user_w_strb;
+
+                carry_w_data    =  'h0;
+                carry_w_strb    =  'h0;
+            end
+
+            else
+            begin   
+                // aligned signal is shifted left because if address is misaligned then there are address bytes in the beginning that we aren't trying to write to
+                aligned_w_data  =  (user_w_data << (w_data_shift_left));
+                aligned_w_strb  =  (user_w_strb << (w_strb_shift_left));
+
+                // carry signal is shifted right because if aligned signals are shifted then we lose the MSB for that beat, so we have to 'carry' it to the next beat or even burst
+                carry_w_data    =  (user_w_data >> (w_data_shift_right));
+                carry_w_strb    =  (user_w_strb >> (w_strb_shift_right));
+            end
+        end
+
+        // ALGINER: SEQ logic to flop carry data + w_strb LSB to next burst beat
+        always_ff @(posedge aclk) 
+        begin
+            if (~aresetn) 
+            begin
+                align_carry_valid_ff <= 1'b0;   // signal checks to see if there is any valid data
+                align_carry_w_data_ff <= '0;    // LSB data to be carried to next beat in misaligned burst
+                align_carry_w_strb_ff <= '0;    // LSB w_strb to be carried to next beat in misaligned burst
+            end
+
+            // if (SPLIT_PAGE_BOUNDARY > 0), the starting address is misaligned, and the burst is split (either from page boundary or exceeds MAX_BURST_BEATS) 
+            // then we need to insert the carry data + wstrb of the last beat into the first beat of the next burst created in the split burst
+            else if (start_w_ff && burst_w_split_flag_ff) 
+            begin
+                align_carry_valid_ff <= split_carry_valid_ff;
+                align_carry_w_data_ff <= split_carry_w_data_ff;
+                align_carry_w_strb_ff <= split_carry_w_strb_ff;
+            end
+
+            // restart at start of write burst (carry data is flopped into every beat after the first beat of a burst)
+            else if (start_w_ff && ~burst_w_split_flag_ff) 
+            begin
+                align_carry_valid_ff <= 1'b0;
+                align_carry_w_data_ff <= '0;
+                align_carry_w_strb_ff <= '0;
+            end
+
+            // flopping carry data + w_strb LSB for next beat in the burst
+            else if (axi_w_cs==WRITE && m_axi_wready && m_axi_wvalid) 
+            begin
+                align_carry_valid_ff <= (|carry_w_strb);
+                align_carry_w_data_ff <= carry_w_data;
+                align_carry_w_strb_ff <= carry_w_strb;
+            end
+        end
+
+        // SPLITTER: SEQ logic to flop the carry data + w_strb of the last beat in a split burst to be used in the first beat of the next burst
+        always_ff @(posedge aclk) 
+        begin
+            if (~aresetn) 
+            begin
+                split_carry_valid_ff <= 1'b0;   // signal checks to see if there is any valid data
+                split_carry_w_data_ff <= '0;    // LSB data to be carried to first beat of next burst in split burst
+                split_carry_w_strb_ff <= '0;    // LSB w_strb to be carried to first beat of next burst in split burst
+            end
+
+            // if (SPLIT_PAGE_BOUNDARY > 0), the starting address is misaligned, and the burst is split (either from page boundary or exceeds MAX_BURST_BEATS),
+            // then flop the LSB data + wstrb of the last beat of the current burst
+            else if ((axi_w_cs == WRITE) && m_axi_wvalid && m_axi_wready && m_axi_wlast && burst_w_split_flag_ff) 
+            begin
+                split_carry_valid_ff <= |carry_w_strb;
+                split_carry_w_data_ff <= carry_w_data;
+                split_carry_w_strb_ff <= carry_w_strb;
+            end
+
+            // inactive if burst split flag is not set
+            else if (start_w_ff && ~burst_w_split_flag_ff) 
+            begin
+                split_carry_valid_ff <= 'h0;
+                split_carry_w_data_ff <= 'h0;
+                split_carry_w_strb_ff <= 'h0;
+            end
+        end
+
+        // OUT TO AXI WRITE PORT: COMB logic to do (<aligned data current shifted left [LSB shifted left]> | <aligned carry data previous beat shifted right [MSB shifted right]>)
+        always_comb
+        begin
+            aligned_w_data_final = 'h0;
+            aligned_w_strb_final = 'h0;
+
+            aligned_w_data_final = ((align_carry_valid_ff) ? align_carry_w_data_ff : 'h0)| aligned_w_data;
+            aligned_w_strb_final = ((align_carry_valid_ff) ? align_carry_w_strb_ff : 'h0)| aligned_w_strb;
+        end
+    end
+endgenerate
+
+endmodule
         /* example:
         Parameters:
             DATA_W_BYTES = 16 (128-bit)
@@ -841,30 +862,58 @@ generate
             -> no_beats_fit flag would incur an error...
         */
 
-// ---- Error Flop set and clr for output port ----//
-        assign user_w_cmd_error     = user_w_cmd_error_ff;
+    /*
+    ---- Misaligned Address Components ---- // also handles misalignment after burst split too
+    1. start mechanism
+        - if(user_w_start) flop in the awlen, addr, and address misalignment -> go to 2
+        - if(burst split flag) in previous burst (in 3.) -> go to 3
+    2. combo detecting:
+        - address misalignment
+        - burst splitting requirement
+        - error detection
+        - beats, awlen, and awlen split (second burst) decided
+        - go to 3
+    3. flop:
+        - if not (burst split flag) flop address (auto align to beat byte boundary) + awlen
+            - if required split was detected in 2. then flop the burst split flag, first address after split, and awlen after split
+        - if(burst split flag) flop address + awlen from when burst split was detected in the ^ immediate line above
+            - this ^ would happen at the beginning of second burst in burst split
+    4. dealing with address misalignment
+        - data shifting:
+            - comb logic:
+                - finds the left + right shift amount and calculates the aligned data + carry data
+            - aligner:
+                - if(misaligned address) carry data + wstrb from current beat is flopped to be used in the next beat sent to axi slave
+            - splitter:
+                - if(burst split flag) carry data + wstrb from last beat of current burst is flopped to be used in the first beat of the next burst created because of split burst
+            - last comb logic:
+                - data sent to axi write port  = ((first beat) ? 0 : carry data from previous beat) | (aligned data from current beat)
 
-        always_ff @ (posedge aclk)
-        begin
-            if(~aresetn)
-            begin
-                user_w_cmd_error_ff <= 'h0;
-            end
+        - explanation
+            - if the starting address is misaligned then every single input data beat needs to be split to account for this misalignment (because each burst beat must be beat-byte aligned)
+            - for example, if the starting address is misaligned by 4 bytes then we need to adjust each data beat accordingly:
+                - data in = 0x1111_0001_0100_0110
+                    - address was shifted right by 4 bytes... which means we need to shift each data in + wstrb by one byte... but remember the first byte does not contain valid writing territory... but we can't lose the top portition of the input beat so we need to carry that to the next beat
+                    --> to deal with address shift due to misalignment: data in becomes: 0x1111_0001_0100_0110 << (4 byte) = 0x0100_0110_0000_0000
+                        - why right shift? : because when address is shifted right to meet the beat-byte alignment, the extra addresses added to the burst are not part of the desired write territory. Therefore, we have to shift the data-in in the opposite direction (left) to compensate for these extra undesired addresses being added to the burst
+                    --> BUT we don't want to lose the top portion of this beat so it becomes the carry which is flopped in as the LSB of the next beat -> carry = 0x1111_0001
+                
+            - example extended:
+                - misalignment amount was 4 bytes
+                - 1. first beat: data in = 0x1111_0001_0100_0110
+                    - carry from previous beat = 0x0 (first beat that's not after a split)
 
-            else
-            begin
-                if(start_w_ff)
-                begin
-                    user_w_cmd_error_ff <= 'h0;
-                end
+                    - aligned data = (data in) << 4 bytes = 0x0100_0110_0000_0000
+                    - carry data for next beat = (data in) >> 4 bytes = 0x1111_0001
 
-                else if(axi_w_cs==WRITE_CHK_CMD)
-                begin
-                    user_w_cmd_error_ff <= error_wrap;
-                end
-            end
-        end
-    end
-endgenerate
+                    --> <data to axi port = 0x0100_0110_0000_0000>
+                - 2. data in = 0x1010_1111_1100_0011
+                    - carry from previous beat = 0x1111_0001
 
-endmodule
+                    - aligned data = (data in) << 4 bytes = 0x1100_0011_0000_0000
+                    - carry data for next beat = (data in) >> 4 bytes = 0x1010_1111
+                    
+                    --> <data to axi port = (aligned data current beat shift left) | (carry data previous beat shifted right)  = (0x1100_0011_0000_0000) | (0x1111_0001) = 0x1100_0011_1111_0001> 
+
+                ....
+    */
